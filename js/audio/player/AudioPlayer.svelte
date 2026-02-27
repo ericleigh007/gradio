@@ -77,6 +77,8 @@
 	let audio_player: HTMLAudioElement;
 
 	let stream_active = false;
+	let current_hls: Hls | null = null;
+	let current_stream_url: string | null = null;
 	let subtitles_toggle = $state(true);
 	let subtitle_event_handlers: (() => void)[] = [];
 
@@ -197,7 +199,13 @@
 	};
 
 	async function load_audio(data: string): Promise<void> {
+		// Clean up any active HLS stream before loading static audio
+		if (current_hls) {
+			current_hls.destroy();
+			current_hls = null;
+		}
 		stream_active = false;
+		current_stream_url = null;
 
 		if (waveform_options.show_recording_waveform) {
 			waveform?.load(data);
@@ -216,14 +224,36 @@
 		}
 	});
 
+	let stream_ended = false;
+
+	function on_stream_ended(): void {
+		stream_active = false;
+		stream_ended = true;
+	}
+
 	function load_stream(value: FileData | null): void {
 		if (!value || !value.is_stream || !value.url) return;
 
-		if (Hls.isSupported() && !stream_active) {
-			// Set config to start playback after 1 second of data received
+		// Skip if same URL AND stream is still actively playing.
+		// Once stream_ended fires (audio finished), allow recreation
+		// even with the same URL (handles Python id() reuse).
+		if (value.url === current_stream_url && stream_active && !stream_ended) return;
+
+		// Destroy previous HLS instance to allow a new stream to start
+		if (current_hls) {
+			current_hls.destroy();
+			current_hls = null;
+		}
+		stream_active = false;
+		stream_ended = false;
+
+		if (Hls.isSupported()) {
+			// Buffer enough audio to avoid stalls between segments.
+			// Too low (1s) causes bufferStalledError when segments
+			// arrive slower than real-time (common with AI TTS).
 			const hls = new Hls({
-				maxBufferLength: 1,
-				maxMaxBufferLength: 1,
+				maxBufferLength: 5,
+				maxMaxBufferLength: 10,
 				lowLatencyMode: true
 			});
 			hls.loadSource(value.url);
@@ -252,10 +282,17 @@
 					}
 				}
 			});
+			// Reset stream_active when playback finishes, so same-URL
+			// streams from subsequent generator invocations aren't blocked.
+			audio_player.addEventListener("ended", on_stream_ended, { once: true });
+			current_hls = hls;
+			current_stream_url = value.url;
 			stream_active = true;
-		} else if (!stream_active) {
+		} else {
 			audio_player.src = value.url;
 			if (waveform_settings.autoplay) audio_player.play();
+			audio_player.addEventListener("ended", on_stream_ended, { once: true });
+			current_stream_url = value.url;
 			stream_active = true;
 		}
 	}
@@ -290,6 +327,10 @@
 		window.addEventListener("keydown", handleKeydown);
 
 		return () => {
+			if (current_hls) {
+				current_hls.destroy();
+				current_hls = null;
+			}
 			waveform?.destroy();
 			window.removeEventListener("keydown", handleKeydown);
 		};

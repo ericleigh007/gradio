@@ -1995,9 +1995,16 @@ Received inputs:
                 and block.streaming
                 and not utils.is_prop_update(data[i])
             ):
-                if final:
+                if final and output_id in stream_run:
                     stream_run[output_id].end_stream()
                 first_chunk = output_id not in stream_run
+                # If the stream exists but has already ended (e.g. due to
+                # Python id() reuse after the old iterator was garbage-
+                # collected), treat this as a fresh first chunk so a new
+                # MediaStream is created instead of appending to the
+                # ended one whose #EXT-X-ENDLIST was already served.
+                if not first_chunk and stream_run[output_id].ended and not final:
+                    first_chunk = True
                 binary_data, output_data = await block.stream_output(
                     data[i],
                     f"{session_hash}/{run}/{output_id}/playlist.m3u8",
